@@ -299,6 +299,7 @@ static bool copyFrameToSurface(NVDriver *drv, CUdeviceptr ptr, NVSurface *surfac
 
         uint32_t numStripes = 1;
         uint32_t stripeWidth = surface->width;
+        uint32_t stripeHeight = ROUND_UP(planeHeight, 64);
         if (planeHeight < 88) {
             // When the image height is low enough that calculate_image_size would have picked
             // a shorter block, the dest array has a weird layout:
@@ -323,7 +324,7 @@ static bool copyFrameToSurface(NVDriver *drv, CUdeviceptr ptr, NVSurface *surfac
                 .Height = planeHeight,
                 .WidthInBytes = stripeWidthInBytes,
                 .srcXInBytes = stripe * stripeWidthInBytes,
-                .dstY = (stripe % 2) * planeHeight,
+                .dstY = (stripe % 2) * stripeHeight,
                 .dstXInBytes = (stripe / 2) * stripeWidthInBytes
             };
             if ((i == fmtInfo->numPlanes - 1) && (stripe == numStripes - 1)) {
@@ -333,6 +334,9 @@ static bool copyFrameToSurface(NVDriver *drv, CUdeviceptr ptr, NVSurface *surfac
             }
         }
         y += planeHeight;
+        if (numStripes > 1) {
+            y += stripeHeight;
+        }
     }
 
     //notify anyone waiting for us to be resolved
