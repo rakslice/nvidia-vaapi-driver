@@ -295,22 +295,44 @@ static bool copyFrameToSurface(NVDriver *drv, CUdeviceptr ptr, NVSurface *surfac
 
     for (uint32_t i = 0; i < fmtInfo->numPlanes; i++) {
         const NVFormatPlane *p = &fmtInfo->plane[i];
-        CUDA_MEMCPY2D cpy = {
-            .srcMemoryType = CU_MEMORYTYPE_DEVICE,
-            .srcDevice = ptr,
-            .srcY = y,
-            .srcPitch = pitch,
-            .dstMemoryType = CU_MEMORYTYPE_ARRAY,
-            .dstArray = surface->backingImage->arrays[i],
-            .Height = surface->height >> p->ss.y,
-            .WidthInBytes = (surface->width >> p->ss.x) * fmtInfo->bppc * p->channelCount
-        };
-        if (i == fmtInfo->numPlanes - 1) {
-            CHECK_CUDA_RESULT(drv->cu->cuMemcpy2D(&cpy));
-        } else {
-            CHECK_CUDA_RESULT(drv->cu->cuMemcpy2DAsync(&cpy, 0));
+        uint32_t planeHeight = surface->height >> p->ss.y;
+
+        uint32_t numStripes = 1;
+        uint32_t stripeWidth = surface->width;
+        if (planeHeight < 88) {
+            // When the image height is low enough that calculate_image_size would have picked
+            // a shorter block, the dest array has a weird layout:
+            // n non-contiguous 64-pixel stripes horizontally  0, 1, ..., n-1
+            // In the dest arrays all the stripes are located at x positions 0 to n/2,
+            // with the even n/2 stripes left to right at the normal y offsets for the plane
+            // and the odd n/2 stripes at another height worth of y space below them
+            stripeWidth = 64;
+            numStripes = (surface->width + (stripeWidth - 1)) / stripeWidth;
         }
-        y += cpy.Height;
+
+        uint32_t stripeWidthInBytes = (stripeWidth >> p->ss.x) * fmtInfo->bppc * p->channelCount;
+
+        for (uint32_t stripe = 0; stripe < numStripes; stripe++) {
+            CUDA_MEMCPY2D cpy = {
+                .srcMemoryType = CU_MEMORYTYPE_DEVICE,
+                .srcDevice = ptr,
+                .srcY = y,
+                .srcPitch = pitch,
+                .dstMemoryType = CU_MEMORYTYPE_ARRAY,
+                .dstArray = surface->backingImage->arrays[i],
+                .Height = planeHeight,
+                .WidthInBytes = stripeWidthInBytes,
+                .srcXInBytes = stripe * stripeWidthInBytes,
+                .dstY = (stripe % 2) * planeHeight,
+                .dstXInBytes = (stripe / 2) * stripeWidthInBytes
+            };
+            if ((i == fmtInfo->numPlanes - 1) && (stripe == numStripes - 1)) {
+                CHECK_CUDA_RESULT(drv->cu->cuMemcpy2D(&cpy));
+            } else {
+                CHECK_CUDA_RESULT(drv->cu->cuMemcpy2DAsync(&cpy, 0));
+            }
+        }
+        y += planeHeight;
     }
 
     //notify anyone waiting for us to be resolved
